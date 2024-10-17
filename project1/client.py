@@ -1,6 +1,6 @@
+from collections import OrderedDict
 from common.model import ClientRequest
 from common.utils import CalculateChecksum
-from typing import Dict, List
 
 import json
 import os
@@ -14,6 +14,7 @@ class Client:
         server_port: int = 8082,
         chunk_size: int = 256,
     ) -> None:
+        self.__checksum = ""
         self.__temporary_file_buffer = {}
         self.__base_path = "client_files/"
         self.__output_file = "client.txt"
@@ -41,20 +42,22 @@ class Client:
                 data = data.decode("iso-8859-1")
 
                 if "checksum" in data:
+                    self.__checksum = json.loads(data).get("checksum")
                     self.__clear_client_folder()
                     self.__receive_file()
                     self.__build_file()
-                    self.__check_file_integrity(checksum=data)
 
-                    # if not self.__check_file_integrity(checksum=data):
-                    #     retransmission = str(
-                    #         input("Do you want to retransmit the lost packets? [y/n] ")
-                    #     ).lower()
+                    if not self.__check_file_integrity(checksum=self.__checksum):
+                        retransmission = str(
+                            input("Do you want to retransmit the lost packets? [y/n] ")
+                        ).lower()
 
-                    #     if retransmission == "y":
-                    #         self.__retransmit_lost_pkts()
-                    #         self.__build_file()
-                    #         self.__check_file_integrity(checksum=data)
+                        if retransmission == "y":
+                            self.__retransmit_lost_pkts()
+                            self.__receive_lost_pkts()
+                            self.__clear_client_folder()
+                            self.__build_file()
+                            self.__check_file_integrity(checksum=self.__checksum)
 
                 else:
                     print(data)
@@ -76,8 +79,10 @@ class Client:
 
     def __build_file(self) -> None:
         with open(self.__base_path + self.__output_file, "wb") as file:
-            for chunk in self.__temporary_file_buffer.values():
-                file.write(chunk)
+            for pkt_number in sorted(self.__temporary_file_buffer.keys(), key=int):
+                chunk = self.__temporary_file_buffer[pkt_number]
+                if chunk != b"EOF":
+                    file.write(chunk)
 
     def __receive_file(self) -> None:
         continue_receiving = True
@@ -91,12 +96,10 @@ class Client:
             if chunk == b"EOF":
                 print("File transfer complete.")
                 continue_receiving = False
-            else:
-                self.__temporary_file_buffer.update({pkt_number: chunk})
 
-    def __check_file_integrity(self, checksum: int) -> bool:
-        checksum = json.loads(checksum).get("checksum")
+            self.__temporary_file_buffer.update({pkt_number: chunk})
 
+    def __check_file_integrity(self, checksum: str) -> bool:
         if CalculateChecksum.execute(self.__base_path + self.__output_file) != checksum:
             print("File transfer fail: different checksum")
             return False
@@ -109,23 +112,30 @@ class Client:
             os.remove(self.__base_path + self.__output_file)
 
     def __retransmit_lost_pkts(self) -> None:
-        self.__sock.sendto("Retransmit".encode("iso-8859-1"), self.__server_address)
+        for pkt_number in self.__temporary_file_buffer.keys():
+            self.__sock.sendto(
+                json.dumps({"Retransmit": pkt_number}).encode("iso-8859-1"),
+                self.__server_address,
+            )
 
-        continue_retransmission = True
-        while continue_retransmission:
-            data, _ = self.__sock.recvfrom(self.__chunk_size)
-            answer = data.decode("iso-8859-1")
+        self.__sock.sendto(
+            "Finished retransmission".encode("iso-8859-1"),
+            self.__server_address,
+        )
 
-            if answer == "Finished":
-                continue_retransmission = False
+    def __receive_lost_pkts(self):
+        continue_receiving = True
 
-            if answer == "Send":
-                if not self.__temporary_file_buffer.get(answer):
-                    self.__sock.sendto(answer, self.__server_address)
-                    lost_pkt_chunk, _ = self.__sock.recvfrom(self.__chunk_size)
-                    self.__temporary_file_buffer.update({answer: lost_pkt_chunk})
-                else:
-                    self.__sock.sendto("Ok".encode("iso-8859-1"), self.__server_address)
+        while continue_receiving:
+            pkt_number_rcv, _ = self.__sock.recvfrom(self.__chunk_size)
+            pkt_number_rcv = pkt_number_rcv.decode("utf-8")
+            chunk, _ = self.__sock.recvfrom(self.__chunk_size)
+
+            if pkt_number_rcv == "Finished":
+                continue_receiving = False
+
+            else:
+                self.__temporary_file_buffer.update({pkt_number_rcv: chunk})
 
 
 if __name__ == "__main__":

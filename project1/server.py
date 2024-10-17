@@ -1,8 +1,9 @@
 from common.model import ClientRequest
 from common.utils import CalculateChecksum
 from concurrent.futures import ThreadPoolExecutor
-from typing import Dict, Tuple
+from typing import Dict, List, Tuple
 
+import copy
 import json
 import os
 import random
@@ -16,6 +17,7 @@ class Server:
         self.__base_path = "server_files/"
         self.__chunk_size = chunk_size
         self.__temporary_file_buffer = {}
+        self.__client_retransmit_pkts_dict = {}
         self.__sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.__sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         self.__sock.bind((host, port))
@@ -33,7 +35,15 @@ class Server:
 
             print(f"Client request: {data}")
 
-            if data == "Finish connection":
+            if "Retransmit" in data:
+                pkt_number = json.loads(data)["Retransmit"]
+                self.__client_retransmit_pkts_dict.update({pkt_number: "OK"})
+
+            elif "Finished retransmission" == data:
+                self.__retransmit_lost_pkts(client_address=client_address)
+                self.__client_retransmit_pkts_dict = {}
+
+            elif data == "Finish connection":
                 keep_connection = False
 
             else:
@@ -46,7 +56,7 @@ class Server:
                         file_path=transfer_object.file_name
                     )
 
-                    self.__temporary_file_buffer = chunks_dict
+                    self.__temporary_file_buffer = copy.deepcopy(chunks_dict)
 
                     self.__remove_chunks(
                         chunks_dict=chunks_dict,
@@ -62,12 +72,6 @@ class Server:
                         checksum=checksum,
                         client_address=client_address,
                     )
-
-                    data, client_address = self.__sock.recvfrom(self.__chunk_size)
-                    answer = data.decode("iso-8859-1")
-
-                    if answer == "Finish connection":
-                        keep_connection = False
 
                 else:
                     self.__sock.sendto(
@@ -102,7 +106,7 @@ class Server:
             chunks_dict.clear()
 
         else:
-            for _ in range(discarded_pkts):
+            for _ in range(discarded_pkts - 1):
                 key = random.choice(list(chunks_dict.keys()))
                 del chunks_dict[key]
 
@@ -112,6 +116,7 @@ class Server:
         checksum: str,
         client_address: Tuple[str, int],
     ) -> None:
+
         checksum_dict = json.dumps({"checksum": checksum})
         self.__sock.sendto(checksum_dict.encode("iso-8859-1"), client_address)
 
@@ -123,18 +128,24 @@ class Server:
             self.__sock.sendto(chunk, client_address)
 
     def __retransmit_lost_pkts(self, client_address: Tuple[str, int]) -> None:
+        lost_pkts_list = self.__check_missing_pkts()
+
+        for lost_pkt in lost_pkts_list:
+            chunk = self.__temporary_file_buffer.get(lost_pkt)
+            self.__sock.sendto(lost_pkt.encode("utf-8"), client_address)
+            self.__sock.sendto(chunk, client_address)
+
+        self.__sock.sendto("Finished".encode("iso-8859-1"), client_address)
+        self.__sock.sendto("EOF".encode("iso-8859-1"), client_address)
+
+    def __check_missing_pkts(self) -> List[str]:
+        lost_pkts_list = []
+
         for pkt_number in self.__temporary_file_buffer.keys():
-            self.__sock.sendto(pkt_number.encode("iso-8859-1"), client_address)
+            if not (self.__client_retransmit_pkts_dict.get(pkt_number)):
+                lost_pkts_list.append(pkt_number)
 
-            data, _ = self.__sock.recvfrom(self.__chunk_size)
-
-            answer = data.decode("iso-8859-1")
-
-            if answer == "Ok":
-                continue
-
-            lost_pkt_chunk = self.__temporary_file_buffer.get(pkt_number)
-            self.__sock.sendto(lost_pkt_chunk, client_address)
+        return lost_pkts_list
 
 
 if __name__ == "__main__":
