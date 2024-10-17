@@ -69,8 +69,8 @@ class Client:
                                 self.__build_file()
                                 self.__check_file_integrity(checksum=self.__checksum)
 
-                    else:
-                        print(data)
+                else:
+                    print(data)
 
             except socket.error as e:
                 print(f"Socket error: {str(e)}")
