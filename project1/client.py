@@ -1,9 +1,9 @@
-from collections import OrderedDict
 from common.model import ClientRequest
 from common.utils import CalculateChecksum
 
 import json
 import os
+import shutil
 import socket
 
 
@@ -14,10 +14,12 @@ class Client:
         server_port: int = 8082,
         chunk_size: int = 256,
     ) -> None:
+
+        self.__client_address = ""
         self.__checksum = ""
         self.__temporary_file_buffer = {}
         self.__base_path = "client_files/"
-        self.__output_file = "client.txt"
+        self.__output_file = ""
         self.__server_address = (server_ip, server_port)
         self.__chunk_size = chunk_size
         self.__sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -41,26 +43,34 @@ class Client:
                 data, _ = self.__sock.recvfrom(self.__chunk_size)
                 data = data.decode("iso-8859-1")
 
-                if "checksum" in data:
-                    self.__checksum = json.loads(data).get("checksum")
-                    self.__clear_client_folder()
-                    self.__receive_file()
-                    self.__build_file()
+                if "client_address" in data:
+                    self.__client_address = str(json.loads(data).get("client_address"))
 
-                    if not self.__check_file_integrity(checksum=self.__checksum):
-                        retransmission = str(
-                            input("Do you want to retransmit the lost packets? [y/n] ")
-                        ).lower()
+                    data, _ = self.__sock.recvfrom(self.__chunk_size)
+                    data = data.decode("iso-8859-1")
 
-                        if retransmission == "y":
-                            self.__retransmit_lost_pkts()
-                            self.__receive_lost_pkts()
-                            self.__clear_client_folder()
-                            self.__build_file()
-                            self.__check_file_integrity(checksum=self.__checksum)
+                    if "checksum" in data:
+                        self.__output_file = file_name
+                        self.__checksum = json.loads(data).get("checksum")
+                        self.__receive_file()
+                        self.__build_file()
 
-                else:
-                    print(data)
+                        if not self.__check_file_integrity(checksum=self.__checksum):
+                            retransmission = str(
+                                input(
+                                    "Do you want to retransmit the lost packets? [y/n] "
+                                )
+                            ).lower()
+
+                            if retransmission == "y":
+                                self.__retransmit_lost_pkts()
+                                self.__receive_lost_pkts()
+                                self.__clear_client_folder()
+                                self.__build_file()
+                                self.__check_file_integrity(checksum=self.__checksum)
+
+                    else:
+                        print(data)
 
             except socket.error as e:
                 print(f"Socket error: {str(e)}")
@@ -75,10 +85,15 @@ class Client:
                 )
                 break
 
+        self.__clear_client_folder()
         self.__sock.close()
 
     def __build_file(self) -> None:
-        with open(self.__base_path + self.__output_file, "wb") as file:
+        os.makedirs(self.__base_path + self.__client_address + "/", exist_ok=True)
+
+        with open(
+            self.__base_path + self.__client_address + "/" + self.__output_file, "wb"
+        ) as file:
             for pkt_number in sorted(self.__temporary_file_buffer.keys(), key=int):
                 chunk = self.__temporary_file_buffer[pkt_number]
                 if chunk != b"EOF":
@@ -100,7 +115,12 @@ class Client:
             self.__temporary_file_buffer.update({pkt_number: chunk})
 
     def __check_file_integrity(self, checksum: str) -> bool:
-        if CalculateChecksum.execute(self.__base_path + self.__output_file) != checksum:
+        if (
+            CalculateChecksum.execute(
+                self.__base_path + self.__client_address + "/" + self.__output_file
+            )
+            != checksum
+        ):
             print("File transfer fail: different checksum")
             return False
 
@@ -108,8 +128,7 @@ class Client:
         return True
 
     def __clear_client_folder(self) -> None:
-        if os.path.isfile(self.__base_path + self.__output_file):
-            os.remove(self.__base_path + self.__output_file)
+        shutil.rmtree(self.__base_path + self.__client_address + "/")
 
     def __retransmit_lost_pkts(self) -> None:
         for pkt_number in self.__temporary_file_buffer.keys():

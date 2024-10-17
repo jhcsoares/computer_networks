@@ -33,15 +33,17 @@ class Server:
         while keep_connection:
             data = data.decode("iso-8859-1")
 
-            print(f"Client request: {data}")
+            print(f"Client {client_address} request: {data}")
 
             if "Retransmit" in data:
                 pkt_number = json.loads(data)["Retransmit"]
-                self.__client_retransmit_pkts_dict.update({pkt_number: "OK"})
+                self.__client_retransmit_pkts_dict.update(
+                    {client_address: {pkt_number: "OK"}}
+                )
 
             elif "Finished retransmission" == data:
                 self.__retransmit_lost_pkts(client_address=client_address)
-                self.__client_retransmit_pkts_dict = {}
+                del self.__client_retransmit_pkts_dict[client_address]
 
             elif data == "Finish connection":
                 keep_connection = False
@@ -52,11 +54,20 @@ class Server:
 
                 if self.__check_file_existency(transfer_object.file_name):
 
+                    self.__sock.sendto(
+                        json.dumps({"client_address": client_address[1]}).encode(
+                            "iso-8859-1"
+                        ),
+                        client_address,
+                    )
+
                     chunks_dict = self.__get_file_chunks(
                         file_path=transfer_object.file_name
                     )
 
-                    self.__temporary_file_buffer = copy.deepcopy(chunks_dict)
+                    self.__temporary_file_buffer.update(
+                        {client_address: copy.deepcopy(chunks_dict)}
+                    )
 
                     self.__remove_chunks(
                         chunks_dict=chunks_dict,
@@ -128,21 +139,23 @@ class Server:
             self.__sock.sendto(chunk, client_address)
 
     def __retransmit_lost_pkts(self, client_address: Tuple[str, int]) -> None:
-        lost_pkts_list = self.__check_missing_pkts()
+        lost_pkts_list = self.__check_missing_pkts(client_address=client_address)
 
         for lost_pkt in lost_pkts_list:
-            chunk = self.__temporary_file_buffer.get(lost_pkt)
+            chunk = self.__temporary_file_buffer.get(client_address).get(lost_pkt)
             self.__sock.sendto(lost_pkt.encode("utf-8"), client_address)
             self.__sock.sendto(chunk, client_address)
 
         self.__sock.sendto("Finished".encode("iso-8859-1"), client_address)
         self.__sock.sendto("EOF".encode("iso-8859-1"), client_address)
 
-    def __check_missing_pkts(self) -> List[str]:
+    def __check_missing_pkts(self, client_address: Tuple[str, int]) -> List[str]:
         lost_pkts_list = []
 
-        for pkt_number in self.__temporary_file_buffer.keys():
-            if not (self.__client_retransmit_pkts_dict.get(pkt_number)):
+        for pkt_number in self.__temporary_file_buffer.get(client_address).keys():
+            if not (
+                self.__client_retransmit_pkts_dict.get(client_address).get(pkt_number)
+            ):
                 lost_pkts_list.append(pkt_number)
 
         return lost_pkts_list
