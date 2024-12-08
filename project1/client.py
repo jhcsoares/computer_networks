@@ -23,7 +23,7 @@ class Client:
         self.__server_address = (server_ip, server_port)
         self.__chunk_size = chunk_size
         self.__sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        self.__sock.settimeout(180)
+        self.__sock.settimeout(10000)
 
     def execute(self) -> None:
         while True:
